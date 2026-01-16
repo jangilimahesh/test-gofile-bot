@@ -1,192 +1,202 @@
-import os
-import json
+import re
 import time
-import asyncio
-import subprocess
 import requests
-from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    ContextTypes, filters
+from bs4 import BeautifulSoup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
 )
-from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+from telegram.request import HTTPXRequest
+from telegram.ext.webhookhandler import WebhookHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import threading
+import os
 
 # =========================
-# 🔐 CONFIG
+# CONFIG (ENV VARIABLES)
 # =========================
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # https://your-app.leapcell.app
+
+EDIT_DELAY = 2
+
+FILE_RE = re.compile(r"/file/d/([a-zA-Z0-9_-]+)")
+FOLDER_RE = re.compile(r"/folders/([a-zA-Z0-9_-]+)")
 
 # =========================
-# 🧹 CLEANUP ON START
-# =========================
-def cleanup_storage():
-    for f in os.listdir(DOWNLOAD_DIR):
-        try:
-            os.remove(os.path.join(DOWNLOAD_DIR, f))
-        except:
-            pass
-
-cleanup_storage()
-
-# =========================
-# 🌐 GOFILE
+# GOFILE
 # =========================
 def get_gofile_server():
-    r = requests.get("https://api.gofile.io/servers?zone=default", timeout=10)
-    return r.json()["data"]["servers"][0]["name"]
-
-SERVER = get_gofile_server()
-UPLOAD_URL = f"https://{SERVER}.gofile.io/uploadFile"
-SESSION = requests.Session()
+    return requests.get(
+        "https://api.gofile.io/servers?zone=default",
+        timeout=10
+    ).json()["data"]["servers"][0]["name"]
 
 # =========================
-# 🧮 HELPERS
+# GOOGLE DRIVE
 # =========================
-def human(size):
-    for u in ["B","KB","MB","GB","TB"]:
-        if size < 1024:
-            return f"{size:.2f} {u}"
-        size /= 1024
+def drive_direct_link(fid):
+    return f"https://drive.google.com/uc?id={fid}&export=download"
 
-def bar(p):
-    filled = int(p / 10)
-    return "█" * filled + "░" * (10 - filled)
+def get_drive_filename(fid):
+    html = requests.get(
+        f"https://drive.google.com/file/d/{fid}/view",
+        timeout=10
+    ).text
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("meta", property="og:title")
+    return tag["content"] if tag else fid
 
-# =========================
-# 🎞️ MEDIA INFO
-# =========================
-def media_info(path):
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries",
-        "stream=index,codec_type,codec_name,channels,width,height:stream_tags=language",
-        "-show_entries", "format=duration",
-        "-of", "json", path
-    ]
-    data = json.loads(subprocess.check_output(cmd))
-    video = next(s for s in data["streams"] if s["codec_type"] == "video")
-    quality = f"{video.get('height','?')}p"
-    duration = float(data["format"]["duration"])
-    watch = time.strftime("%H:%M:%S", time.gmtime(duration))
-
-    audios = []
-    for s in data["streams"]:
-        if s["codec_type"] == "audio":
-            lang = s.get("tags", {}).get("language", "und").upper()
-            codec = s.get("codec_name", "unknown").upper()
-            ch = s.get("channels", "?")
-            audios.append(f"{lang} • {codec} • {ch}ch")
-
-    return quality, watch, audios
+def list_drive_folder(folder_id):
+    html = requests.get(
+        f"https://drive.google.com/drive/folders/{folder_id}",
+        timeout=10
+    ).text
+    ids = re.findall(r'"([a-zA-Z0-9_-]{20,})"', html)
+    return list(dict.fromkeys([i for i in ids if i != folder_id]))
 
 # =========================
-# 🚀 START
+# STREAM UPLOAD
+# =========================
+def stream_to_gofile(direct_url, filename, progress_cb):
+    server = get_gofile_server()
+    upload_url = f"https://{server}.gofile.io/uploadFile"
+
+    with requests.get(direct_url, stream=True) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        sent = 0
+
+        def gen():
+            nonlocal sent
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    sent += len(chunk)
+                    if total:
+                        progress_cb(sent, total)
+                    yield chunk
+
+        res = requests.post(
+            upload_url,
+            files={"file": (filename, gen())},
+            timeout=0
+        ).json()
+
+        return res["data"]["downloadPage"]
+
+# =========================
+# BOT HANDLERS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚀 Send me a video or file\n"
-        "I’ll upload it to **gofile.io** and return a public link."
+        "📤 Send a PUBLIC Google Drive FILE or FOLDER link\n\n"
+        "✔ Remote upload\n"
+        "✔ No local storage\n"
+        "✔ Per-file progress"
+    )
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    file_m = FILE_RE.search(text)
+    folder_m = FOLDER_RE.search(text)
+
+    if not (file_m or folder_m):
+        return await update.message.reply_text("❌ Only public Drive links supported")
+
+    status = await update.message.reply_text("🔍 Processing…")
+
+    try:
+        if file_m:
+            await process_file(file_m.group(1), status, context)
+        else:
+            fids = list_drive_folder(folder_m.group(1))
+            if not fids:
+                return await status.edit_text("❌ Folder empty")
+
+            for i, fid in enumerate(fids, 1):
+                await process_file(fid, status, context, i, len(fids))
+
+    except Exception as e:
+        await status.edit_text(f"❌ Error: {e}")
+
+async def process_file(fid, status, context, idx=None, total=None):
+    name = get_drive_filename(fid)
+    direct = drive_direct_link(fid)
+    last = 0
+
+    def progress(sent, total_bytes):
+        nonlocal last
+        now = time.time()
+        if now - last > EDIT_DELAY:
+            pct = sent * 100 / total_bytes
+            text = f"📤 Uploading\n📄 {name}\n📊 {pct:.2f}%"
+            if idx:
+                text = f"({idx}/{total})\n" + text
+            context.application.create_task(status.edit_text(text))
+            last = now
+
+    gofile = stream_to_gofile(direct, name, progress)
+    ddl = f"https://gofile.dd-bypassed.workers.dev/url={gofile}"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("GOFILE", url=gofile)],
+        [InlineKeyboardButton("Direct DDL", url=ddl)]
+    ])
+
+    text = f"✅ <b>{name}</b>\nUpload completed"
+    if idx:
+        text = f"({idx}/{total})\n" + text
+
+    await status.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+        disable_web_page_preview=True
     )
 
 # =========================
-# 📤 FILE HANDLER
+# WEBHOOK SERVER
 # =========================
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = await update.message.reply_text("⬇️ Downloading…")
-
-    tg = update.message.video or update.message.document
-    filename = tg.file_name or f"{tg.file_id}.bin"
-    path = os.path.join(DOWNLOAD_DIR, filename)
-
-    try:
-        tg_file = await tg.get_file()
-        await tg_file.download_to_drive(path)
-
-        size = os.path.getsize(path)
-        last_edit = 0
-        last_percent = 0
-
-        async def safe_edit(text):
-            nonlocal last_edit
-            if time.time() - last_edit > 1.2:  # throttle
-                last_edit = time.time()
-                await status.edit_text(text)
-
-        await safe_edit("🚀 Uploading to gofile.io…")
-
-        def progress_cb(m):
-            nonlocal last_percent
-            percent = int((m.bytes_read / size) * 100)
-            if percent >= last_percent + 5:
-                last_percent = percent
-                context.application.create_task(
-                    safe_edit(
-                        f"🚀 Uploading\n"
-                        f"[{bar(percent)}] {percent}%"
-                    )
-                )
-
-        with open(path, "rb") as f:
-            encoder = MultipartEncoder(fields={"file": (filename, f)})
-            monitor = MultipartEncoderMonitor(encoder, progress_cb)
-
-            r = SESSION.post(
-                UPLOAD_URL,
-                data=monitor,
-                headers={"Content-Type": monitor.content_type},
-                timeout=600
-            )
-
-        res = r.json()
-        if res.get("status") != "ok":
-            raise RuntimeError("Upload failed")
-
-        link = res["data"]["downloadPage"]
-
-        try:
-            quality, watch, audios = media_info(path)
-        except:
-            quality, watch, audios = "N/A", "N/A", []
-
-        text = (
-            f"✅ **Upload Complete**\n\n"
-            f"📦 Size: {human(size)}\n"
-            f"📺 Quality: {quality}\n"
-            f"⏱ Duration: {watch}\n\n"
-        )
-
-        if audios:
-            text += "🔊 **Audio Tracks**\n"
-            for a in audios:
-                text += f"• {a}\n"
-
-        text += f"\n🔗 **Gofile Link**\n{link}"
-
-        await status.edit_text(text, disable_web_page_preview=True)
-
-    except Exception as e:
-        await status.edit_text("❌ Upload cancelled or failed")
-    finally:
-        # 🧹 ALWAYS CLEAN STORAGE
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except:
-                pass
+class Webhook(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("content-length", 0))
+        body = self.rfile.read(length)
+        update = Update.de_json(json.loads(body), app.bot)
+        app.update_queue.put_nowait(update)
+        self.send_response(200)
+        self.end_headers()
 
 # =========================
-# 🤖 MAIN
+# APP INIT
 # =========================
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+request = HTTPXRequest(connection_pool_size=8)
+app: Application = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .request(request)
+    .build()
+)
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, file_handler))
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
 
-    print("🤖 Bot running…")
-    app.run_polling()
+def run():
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8000)),
+        webhook_url=WEBHOOK_URL
+    )
 
 if __name__ == "__main__":
-    main()
+    run()
