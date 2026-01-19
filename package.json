@@ -1,0 +1,8 @@
+{
+  "name": "gofile-vercel-uploader",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.6.2",
+    "form-data": "^4.0.0"
+  }
+}
