@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gofile Uploader</title>
+  <style>
+    body { font-family: sans-serif; background:#0f172a; color:white; display:flex; justify-content:center; }
+    .box { width:420px; margin-top:80px; }
+    input, button { width:100%; padding:12px; border-radius:8px; border:none; }
+    .bar { height:10px; background:#1e293b; border-radius:6px; overflow:hidden; margin-top:10px; }
+    .fill { height:100%; width:0; background:#22c55e; }
+    footer { margin-top:30px; opacity:.7; text-align:center; }
+  </style>
+</head>
+<body>
+
+<div class="box">
+  <h2>Google Drive → Gofile</h2>
+
+  <input id="url" placeholder="Paste Google Drive public link">
+  <button onclick="upload()">Upload</button>
+
+  <div class="bar"><div class="fill" id="fill"></div></div>
+
+  <p id="out"></p>
+
+  <footer>MADE WITH ❤️‍🩹 BY <b>ANIME-CRUZE</b></footer>
+</div>
+
+<script>
+function upload() {
+  const es = new EventSource("/api/progress");
+  es.onmessage = e => {
+    document.getElementById("fill").style.width = e.data + "%";
+  };
+
+  fetch("/api/upload", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body:JSON.stringify({ drive_url: url.value })
+  })
+  .then(r=>r.json())
+  .then(d=>{
+    es.close();
+    out.innerHTML = `<a href="${d.link}" target="_blank">${d.link}</a>`;
+  });
+}
+</script>
+
+</body>
+</html>
