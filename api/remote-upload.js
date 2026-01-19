@@ -9,7 +9,7 @@ function extractFileId(url) {
 }
 
 function driveDirect(fileId) {
-  // IMPORTANT: this bypasses the virus warning page
+  // No auth, no cookies, best possible public URL
   return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
 }
 
@@ -22,16 +22,15 @@ export default async function handler(req, res) {
     if (!fileId)
       return res.status(400).json({ error: "Invalid Drive link" });
 
-    // 1️⃣ Get Gofile server
+    // Get Gofile server
     const server =
       (await axios.get("https://api.gofile.io/servers"))
         .data.data.servers[0].name;
 
-    // 2️⃣ Multipart form (REQUIRED)
+    // Multipart form (required)
     const form = new FormData();
     form.append("fileUrl", driveDirect(fileId));
 
-    // 3️⃣ Start remote upload
     const r = await axios.post(
       `https://${server}.gofile.io/uploadFile`,
       form,
@@ -39,7 +38,10 @@ export default async function handler(req, res) {
     );
 
     if (r.data.status !== "ok") {
-      throw new Error("Gofile rejected remote URL");
+      return res.status(400).json({
+        error: "Gofile rejected the URL",
+        reason: r.data
+      });
     }
 
     res.json({
@@ -48,7 +50,6 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    console.error("REMOTE UPLOAD ERROR:", err.message);
     res.status(500).json({
       error: "Remote upload failed",
       details: err.message
