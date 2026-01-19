@@ -1,47 +1,176 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Gofile Uploader</title>
-  <style>
-    body { font-family: sans-serif; background:#0f172a; color:white; display:flex; justify-content:center; }
-    .box { width:420px; margin-top:80px; }
-    input, button { width:100%; padding:12px; border-radius:8px; border:none; }
-    .bar { height:10px; background:#1e293b; border-radius:6px; overflow:hidden; margin-top:10px; }
-    .fill { height:100%; width:0; background:#22c55e; }
-    footer { margin-top:30px; opacity:.7; text-align:center; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Drive → Gofile Uploader</title>
+
+<style>
+:root{
+  --bg:#0f172a;
+  --card:#020617;
+  --accent:#22c55e;
+  --muted:#94a3b8;
+}
+
+*{box-sizing:border-box}
+
+body{
+  margin:0;
+  min-height:100vh;
+  background:var(--bg);
+  color:#fff;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:
+    env(safe-area-inset-top)
+    env(safe-area-inset-right)
+    env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+
+.card{
+  width:100%;
+  max-width:420px;
+  background:var(--card);
+  border-radius:16px;
+  padding:20px;
+  box-shadow:0 10px 40px rgba(0,0,0,.5);
+}
+
+h1{
+  margin:0 0 6px;
+  font-size:22px;
+  text-align:center;
+}
+
+p.sub{
+  margin:0 0 16px;
+  text-align:center;
+  font-size:13px;
+  color:var(--muted);
+}
+
+input{
+  width:100%;
+  padding:14px;
+  border-radius:12px;
+  border:none;
+  outline:none;
+  background:#020617;
+  color:#fff;
+  font-size:14px;
+}
+
+button{
+  width:100%;
+  margin-top:12px;
+  padding:14px;
+  border:none;
+  border-radius:12px;
+  background:var(--accent);
+  color:#022c22;
+  font-size:16px;
+  font-weight:600;
+  cursor:pointer;
+}
+
+button:active{
+  transform:scale(.98);
+}
+
+.progress{
+  margin-top:16px;
+  width:100%;
+  height:12px;
+  background:#020617;
+  border-radius:999px;
+  overflow:hidden;
+  display:none;
+}
+
+.bar{
+  height:100%;
+  width:0%;
+  background:linear-gradient(90deg,#22c55e,#4ade80);
+  transition:width .2s ease;
+}
+
+.result{
+  margin-top:14px;
+  word-break:break-all;
+  font-size:14px;
+  text-align:center;
+}
+
+.result a{
+  color:#4ade80;
+  text-decoration:none;
+}
+
+footer{
+  margin-top:20px;
+  text-align:center;
+  font-size:12px;
+  color:var(--muted);
+}
+</style>
 </head>
+
 <body>
 
-<div class="box">
-  <h2>Google Drive → Gofile</h2>
+<div class="card">
+  <h1>Drive → Gofile</h1>
+  <p class="sub">Upload public Google Drive files</p>
 
-  <input id="url" placeholder="Paste Google Drive public link">
-  <button onclick="upload()">Upload</button>
+  <input id="url" placeholder="Paste Google Drive public link" />
 
-  <div class="bar"><div class="fill" id="fill"></div></div>
+  <button onclick="startUpload()">Upload</button>
 
-  <p id="out"></p>
+  <div class="progress" id="progress">
+    <div class="bar" id="bar"></div>
+  </div>
 
-  <footer>MADE WITH ❤️‍🩹 BY <b>ANIME-CRUZE</b></footer>
+  <div class="result" id="result"></div>
+
+  <footer>made with ❤️‍🩹 by <b>ANIME-CRUZE</b></footer>
 </div>
 
 <script>
-function upload() {
-  const es = new EventSource("/api/progress");
-  es.onmessage = e => {
-    document.getElementById("fill").style.width = e.data + "%";
-  };
+let es;
 
-  fetch("/api/upload", {
+function startUpload(){
+  const driveUrl = url.value.trim();
+  if(!driveUrl) return alert("Paste a Google Drive link");
+
+  result.innerHTML = "";
+  bar.style.width = "0%";
+  progress.style.display = "block";
+
+  // Live progress
+  es = new EventSource("/api/progress");
+  es.onmessage = e => bar.style.width = e.data + "%";
+
+  fetch("/api/upload",{
     method:"POST",
     headers:{ "Content-Type":"application/json" },
-    body:JSON.stringify({ drive_url: url.value })
+    body:JSON.stringify({ drive_url: driveUrl })
   })
   .then(r=>r.json())
   .then(d=>{
     es.close();
-    out.innerHTML = `<a href="${d.link}" target="_blank">${d.link}</a>`;
+    if(d.success){
+      bar.style.width = "100%";
+      result.innerHTML = `<a href="${d.link}" target="_blank">${d.link}</a>`;
+    }else{
+      result.textContent = d.error || "Upload failed";
+    }
+  })
+  .catch(()=>{
+    es.close();
+    result.textContent = "Server error";
   });
 }
 </script>
