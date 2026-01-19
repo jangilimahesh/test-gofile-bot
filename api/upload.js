@@ -1,7 +1,7 @@
 import axios from "axios";
 import { sendProgress } from "./progress.js";
 
-/* ───── Helpers ───── */
+/* ───────── HELPERS ───────── */
 
 function extractFileId(url) {
   const m =
@@ -10,9 +10,11 @@ function extractFileId(url) {
   return m ? (m[1] || m[2]) : null;
 }
 
-const UPNSHARE_API = "https://upnshare.com/api";
+function driveDirect(fileId) {
+  return `https://drive.google.com/uc?export=download&id=${fileId}`;
+}
 
-/* ───── Telegram ───── */
+/* ───────── TELEGRAM ───────── */
 
 async function sendTelegram(text, keyboard) {
   await axios.post(
@@ -26,48 +28,74 @@ async function sendTelegram(text, keyboard) {
   );
 }
 
-/* ───── UpnShare API ───── */
+/* ───────── UPNSHARE API ───────── */
 
-async function startRemote(url) {
-  const r = await axios.post(`${UPNSHARE_API}/remote/upload`, {
-    api_key: process.env.UPNSHARE_API_KEY,
-    url
-  });
-  return r.data;
-}
+const API_BASE = "https://upnshare.com/api/v1/video";
 
-async function checkStatus(taskId) {
-  const r = await axios.get(`${UPNSHARE_API}/remote/status`, {
-    params: {
+/**
+ * Start advanced remote upload
+ */
+async function startAdvancedUpload(remoteUrl) {
+  const res = await axios.post(
+    `${API_BASE}/advance-upload`,
+    new URLSearchParams({
       api_key: process.env.UPNSHARE_API_KEY,
-      task_id: taskId
+      url: remoteUrl
+    }),
+    {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      }
     }
-  });
-  return r.data;
+  );
+  return res.data;
 }
 
-/* ───── MAIN ───── */
+/**
+ * Check upload status
+ * NOTE: endpoint name may vary slightly; this matches common UpnShare pattern
+ */
+async function checkStatus(taskId) {
+  const res = await axios.get(
+    `${API_BASE}/upload-status`,
+    {
+      params: {
+        api_key: process.env.UPNSHARE_API_KEY,
+        task_id: taskId
+      }
+    }
+  );
+  return res.data;
+}
+
+/* ───────── MAIN HANDLER ───────── */
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST")
       return res.status(405).json({ error: "POST only" });
 
-    const fileId = extractFileId(req.body.drive_url);
-    if (!fileId) throw new Error("Invalid Drive link");
+    const { drive_url } = req.body;
+    const fileId = extractFileId(drive_url);
 
-    const remoteURL =
-      `https://drive.google.com/uc?export=download&id=${fileId}`;
+    if (!fileId)
+      return res.status(400).json({ error: "Invalid Drive link" });
 
-    const start = await startRemote(remoteURL);
-    if (!start.task_id) throw new Error("Remote upload failed");
+    const remoteURL = driveDirect(fileId);
 
-    let lastProgress = 0;
+    // 1️⃣ Start advanced upload
+    const start = await startAdvancedUpload(remoteURL);
+
+    if (!start.task_id)
+      throw new Error(start.message || "Failed to start upload");
+
     let status;
+    let lastProgress = 0;
 
-    // Poll UpnShare every 2 seconds
+    // 2️⃣ Poll progress (every 2 seconds)
     for (let i = 0; i < 120; i++) {
       await new Promise(r => setTimeout(r, 2000));
+
       status = await checkStatus(start.task_id);
 
       // REAL progress mapping (if supported)
@@ -77,7 +105,7 @@ export default async function handler(req, res) {
           sendProgress(lastProgress);
         }
       } else {
-        // fallback status-based progress
+        // Fallback based on state
         if (status.status === "downloading") sendProgress(50);
         if (status.status === "processing") sendProgress(80);
       }
@@ -88,7 +116,7 @@ export default async function handler(req, res) {
       }
 
       if (status.status === "error")
-        throw new Error(status.message || "Upload error");
+        throw new Error(status.message || "Upload failed");
     }
 
     if (status.status !== "completed")
@@ -96,6 +124,7 @@ export default async function handler(req, res) {
 
     const file = status.file;
 
+    // 3️⃣ Telegram UI mirror
     await sendTelegram(
 `📤 <b>Drive → UpnShare Upload</b>
 
@@ -112,6 +141,7 @@ made with ❤️‍🩹 by <b>ANIME-CRUZE</b>`,
       }
     );
 
+    // 4️⃣ Response to frontend
     res.json({
       success: true,
       link: file.download_url,
@@ -123,7 +153,7 @@ made with ❤️‍🩹 by <b>ANIME-CRUZE</b>`,
     sendProgress(0);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: err.response?.data || err.message
     });
   }
 }
