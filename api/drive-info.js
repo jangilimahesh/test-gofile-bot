@@ -7,37 +7,38 @@ function extractFileId(url) {
   return m ? (m[1] || m[2]) : null;
 }
 
-function formatSize(bytes) {
-  if (!bytes) return "Unknown";
-  const u = ["B","KB","MB","GB","TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return (bytes / Math.pow(1024, i)).toFixed(2) + " " + u[i];
+function format(bytes){
+  if(!bytes) return "Unknown";
+  const u=["B","KB","MB","GB","TB"];
+  const i=Math.floor(Math.log(bytes)/Math.log(1024));
+  return (bytes/1024**i).toFixed(2)+" "+u[i];
 }
 
-export default async function handler(req, res) {
-  try {
-    const fileId = extractFileId(req.query.url);
-    if (!fileId) throw new Error("Invalid Drive URL");
+export default async function handler(req,res){
+  const fileId = extractFileId(req.query.url);
+  if(!fileId) return res.status(400).json({error:"Invalid Drive link"});
 
-    const meta = await axios.get(
-      `https://www.googleapis.com/drive/v3/files/${fileId}`,
-      {
-        params: {
-          alt: "json",
-          fields: "name,size"
-        },
-        headers: {
-          Authorization: `Bearer ${process.env.GOOGLE_DRIVE_TOKEN}`
-        }
-      }
+  try{
+    const head = await axios.head(
+      `https://drive.google.com/uc?export=download&id=${fileId}`,
+      { maxRedirects: 5 }
     );
 
+    const size = head.headers["content-length"];
+    const disp = head.headers["content-disposition"];
+
+    let name = "Unknown file";
+    if(disp){
+      const m = disp.match(/filename="(.+?)"/);
+      if(m) name = m[1];
+    }
+
     res.json({
-      fileName: meta.data.name,
-      fileSize: formatSize(meta.data.size)
+      fileName: name,
+      fileSize: format(size)
     });
 
-  } catch {
-    res.status(500).json({ error: "Unable to detect file info" });
+  }catch{
+    res.status(500).json({error:"Unable to fetch info"});
   }
 }
