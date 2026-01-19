@@ -50,7 +50,7 @@ export default async function handler(req, res) {
   const link = up.data.data.downloadPage;
 
   await sendTelegram(
-    `📤 <b>New Upload</b>\n🔗 ${link}\n\n💙 made with ❤️‍🩹 by ANIME-CRUZE`
+    `📤 <b>New Upload</b>\n🔗 ${link}\n\n💙 MADE WITH ❤️‍🩹 BY ANIME-CRUZE`
   );
 
   res.json({ success: true, link });
