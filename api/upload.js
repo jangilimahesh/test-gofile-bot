@@ -2,7 +2,7 @@ import axios from "axios";
 import FormData from "form-data";
 import { sendProgress } from "./progress.js";
 
-/* ───────── GOOGLE DRIVE FIX ───────── */
+/* ───── Drive helpers ───── */
 
 function extractFileId(url) {
   const m =
@@ -14,7 +14,6 @@ function extractFileId(url) {
 async function getDriveStream(fileId) {
   const base = "https://drive.google.com/uc?export=download";
 
-  // First request (may return warning page)
   const res1 = await axios.get(base, {
     params: { id: fileId },
     responseType: "stream",
@@ -24,10 +23,8 @@ async function getDriveStream(fileId) {
   const cookies = res1.headers["set-cookie"] || [];
   const warn = cookies.find(c => c.includes("download_warning"));
 
-  // Small file → direct stream
   if (!warn) return res1;
 
-  // Large file → confirm token
   const confirm = warn.split(";")[0].split("=")[1];
 
   return axios.get(base, {
@@ -36,20 +33,21 @@ async function getDriveStream(fileId) {
   });
 }
 
-/* ───────── TELEGRAM ───────── */
+/* ───── Telegram ───── */
 
-async function sendTelegram(text) {
+async function sendTelegram(msg, keyboard) {
   await axios.post(
     `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
     {
       chat_id: process.env.LOG_CHANNEL_ID,
-      text,
-      parse_mode: "HTML"
+      parse_mode: "HTML",
+      text: msg,
+      reply_markup: keyboard
     }
   );
 }
 
-/* ───────── MAIN HANDLER ───────── */
+/* ───── Handler ───── */
 
 export default async function handler(req, res) {
   try {
@@ -58,30 +56,25 @@ export default async function handler(req, res) {
 
     const { drive_url } = req.body;
     const fileId = extractFileId(drive_url);
-
     if (!fileId)
       return res.status(400).json({ error: "Invalid Drive link" });
 
-    // Get Gofile server
-    const server = (await axios.get("https://api.gofile.io/servers"))
-      .data.data.servers[0].name;
+    const server =
+      (await axios.get("https://api.gofile.io/servers"))
+        .data.data.servers[0].name;
 
-    // Get REAL file stream
     const driveRes = await getDriveStream(fileId);
 
-    // Safety check (prevents HTML uploads)
-    if (driveRes.headers["content-type"]?.includes("text/html")) {
-      throw new Error("Google Drive returned HTML, not file");
-    }
+    if (driveRes.headers["content-type"]?.includes("text/html"))
+      throw new Error("Drive returned HTML");
 
     const total = Number(driveRes.headers["content-length"] || 0);
     let uploaded = 0;
 
     driveRes.data.on("data", chunk => {
       uploaded += chunk.length;
-      if (total) {
+      if (total)
         sendProgress(Math.floor((uploaded / total) * 100));
-      }
     });
 
     const form = new FormData();
@@ -94,9 +87,25 @@ export default async function handler(req, res) {
     );
 
     const link = up.data.data.downloadPage;
+    const sizeGB = total ? (total / 1024 ** 3).toFixed(2) : "Unknown";
 
     await sendTelegram(
-      `📤 <b>New Upload</b>\n🔗 ${link}\n\nmade with ❤️‍🩹 by <b>ANIME-CRUZE</b>`
+`📤 <b>Drive → Gofile Upload</b>
+
+📦 <b>Size:</b> ${sizeGB} GB
+🔗 <b>Link:</b>
+${link}
+
+made with ❤️‍🩹 by <b>ANIME-CRUZE</b>`,
+      {
+        inline_keyboard: [[
+          { text: "📥 Open Gofile", url: link },
+          {
+            text: "⚡ Direct DDL",
+            url: `https://gofile.dd-bypassed.workers.dev/url=${link}`
+          }
+        ]]
+      }
     );
 
     res.json({ success: true, link });
