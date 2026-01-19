@@ -1,7 +1,7 @@
 {
   "functions": {
-    "api/upload.js": { "maxDuration": 60 },
-    "api/progress.js": { "maxDuration": 60 },
-    "api/drive-info.js": { "maxDuration": 10 }
+    "api/upload.js": { "maxDuration": 540 },
+    "api/progress.js": { "maxDuration": 540 },
+    "api/drive-info.js": { "maxDuration": 30 }
   }
 }
