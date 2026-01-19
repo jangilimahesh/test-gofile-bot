@@ -14,8 +14,8 @@ export default function handler(req, res) {
   });
 }
 
-export function sendProgress(percent) {
+export function sendProgress(value) {
   clients.forEach(res => {
-    res.write(`data: ${percent}\n\n`);
+    res.write(`data: ${value}\n\n`);
   });
 }
