@@ -1,8 +1,7 @@
 import axios from "axios";
-import FormData from "form-data";
 import { sendProgress } from "./progress.js";
 
-/* ───── Drive helpers ───── */
+/* ───── Helpers ───── */
 
 function extractFileId(url) {
   const m =
@@ -11,106 +10,120 @@ function extractFileId(url) {
   return m ? (m[1] || m[2]) : null;
 }
 
-async function getDriveStream(fileId) {
-  const base = "https://drive.google.com/uc?export=download";
-
-  const res1 = await axios.get(base, {
-    params: { id: fileId },
-    responseType: "stream",
-    validateStatus: () => true
-  });
-
-  const cookies = res1.headers["set-cookie"] || [];
-  const warn = cookies.find(c => c.includes("download_warning"));
-
-  if (!warn) return res1;
-
-  const confirm = warn.split(";")[0].split("=")[1];
-
-  return axios.get(base, {
-    params: { id: fileId, confirm },
-    responseType: "stream"
-  });
-}
+const UPNSHARE_API = "https://upnshare.com/api";
 
 /* ───── Telegram ───── */
 
-async function sendTelegram(msg, keyboard) {
+async function sendTelegram(text, keyboard) {
   await axios.post(
     `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`,
     {
       chat_id: process.env.LOG_CHANNEL_ID,
       parse_mode: "HTML",
-      text: msg,
+      text,
       reply_markup: keyboard
     }
   );
 }
 
-/* ───── Handler ───── */
+/* ───── UpnShare API ───── */
+
+async function startRemote(url) {
+  const r = await axios.post(`${UPNSHARE_API}/remote/upload`, {
+    api_key: process.env.UPNSHARE_API_KEY,
+    url
+  });
+  return r.data;
+}
+
+async function checkStatus(taskId) {
+  const r = await axios.get(`${UPNSHARE_API}/remote/status`, {
+    params: {
+      api_key: process.env.UPNSHARE_API_KEY,
+      task_id: taskId
+    }
+  });
+  return r.data;
+}
+
+/* ───── MAIN ───── */
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST")
       return res.status(405).json({ error: "POST only" });
 
-    const { drive_url } = req.body;
-    const fileId = extractFileId(drive_url);
-    if (!fileId)
-      return res.status(400).json({ error: "Invalid Drive link" });
+    const fileId = extractFileId(req.body.drive_url);
+    if (!fileId) throw new Error("Invalid Drive link");
 
-    const server =
-      (await axios.get("https://api.gofile.io/servers"))
-        .data.data.servers[0].name;
+    const remoteURL =
+      `https://drive.google.com/uc?export=download&id=${fileId}`;
 
-    const driveRes = await getDriveStream(fileId);
+    const start = await startRemote(remoteURL);
+    if (!start.task_id) throw new Error("Remote upload failed");
 
-    if (driveRes.headers["content-type"]?.includes("text/html"))
-      throw new Error("Drive returned HTML");
+    let lastProgress = 0;
+    let status;
 
-    const total = Number(driveRes.headers["content-length"] || 0);
-    let uploaded = 0;
+    // Poll UpnShare every 2 seconds
+    for (let i = 0; i < 120; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      status = await checkStatus(start.task_id);
 
-    driveRes.data.on("data", chunk => {
-      uploaded += chunk.length;
-      if (total)
-        sendProgress(Math.floor((uploaded / total) * 100));
-    });
+      // REAL progress mapping (if supported)
+      if (typeof status.progress === "number") {
+        if (status.progress !== lastProgress) {
+          lastProgress = status.progress;
+          sendProgress(lastProgress);
+        }
+      } else {
+        // fallback status-based progress
+        if (status.status === "downloading") sendProgress(50);
+        if (status.status === "processing") sendProgress(80);
+      }
 
-    const form = new FormData();
-    form.append("file", driveRes.data);
+      if (status.status === "completed") {
+        sendProgress(100);
+        break;
+      }
 
-    const up = await axios.post(
-      `https://${server}.gofile.io/uploadFile`,
-      form,
-      { headers: form.getHeaders() }
-    );
+      if (status.status === "error")
+        throw new Error(status.message || "Upload error");
+    }
 
-    const link = up.data.data.downloadPage;
-    const sizeGB = total ? (total / 1024 ** 3).toFixed(2) : "Unknown";
+    if (status.status !== "completed")
+      throw new Error("Upload timeout");
+
+    const file = status.file;
 
     await sendTelegram(
-`📤 <b>Drive → Gofile Upload</b>
+`📤 <b>Drive → UpnShare Upload</b>
 
-📦 <b>Size:</b> ${sizeGB} GB
+📄 <b>Name:</b> ${file.name}
+📦 <b>Size:</b> ${file.size}
 🔗 <b>Link:</b>
-${link}
+${file.download_url}
 
 made with ❤️‍🩹 by <b>ANIME-CRUZE</b>`,
       {
         inline_keyboard: [[
-          { text: "📥 Open Gofile", url: link },
-          {
-            text: "⚡ Direct DDL",
-            url: `https://gofile.dd-bypassed.workers.dev/url=${link}`
-          }
+          { text: "📥 Download", url: file.download_url }
         ]]
       }
     );
 
-    res.json({ success: true, link });
+    res.json({
+      success: true,
+      link: file.download_url,
+      name: file.name,
+      size: file.size
+    });
 
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    sendProgress(0);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 }
