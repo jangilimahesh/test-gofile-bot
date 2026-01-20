@@ -17,11 +17,13 @@ export default async function handler(req,res){
       validateStatus: () => true
     });
 
-    const size = head.headers["content-length"];
+    const type = head.headers["content-type"];
+    if(type?.includes("text/html")){
+      return res.status(400).json({ error:"Not a direct download link" });
+    }
+
+    let name = url.split("/").pop().split("?")[0];
     const dispo = head.headers["content-disposition"];
-
-    let name = url.split("/").pop().split("?")[0] || "Unknown";
-
     if(dispo){
       const m = dispo.match(/filename="?(.+?)"?$/);
       if(m) name = m[1];
@@ -29,8 +31,8 @@ export default async function handler(req,res){
 
     res.json({
       fileName: decodeURIComponent(name),
-      fileSize: format(size),
-      contentType: head.headers["content-type"]
+      fileSize: format(head.headers["content-length"]),
+      contentType: type
     });
 
   }catch{
