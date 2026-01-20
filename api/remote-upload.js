@@ -10,16 +10,13 @@ export default async function handler(req,res){
     if(!file_url)
       return res.status(400).json({ error:"file_url required" });
 
-    // 1️⃣ Get gofile server
     const server =
       (await axios.get("https://api.gofile.io/servers"))
         .data.data.servers[0].name;
 
-    // 2️⃣ Multipart form (MANDATORY)
     const form = new FormData();
     form.append("fileUrl", file_url);
 
-    // 3️⃣ Start remote upload
     const r = await axios.post(
       `https://${server}.gofile.io/uploadFile`,
       form,
